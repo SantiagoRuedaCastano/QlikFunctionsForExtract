@@ -1,0 +1,114 @@
+﻿
+
+///$tab Functions
+/*
+Copyright (C) 2019  Santiago Rueda
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+*/
+
+//Connection String in external resource
+$(Must_Include=App.config); //you must replace with your connection string
+
+//Global path for the QVD files
+LET QVDPath = '';
+
+
+//The function tests if the value of Create time of a qvd is NULL and if so, returns -1 (True), otherwise 0 (False)
+SUB ExistQvd(QVDFileName)
+	LET QVDExist = IsNull(QvdCreateTime('$(QVDFileName)'));
+ENDSUB
+
+//it will save to disk the QVD, after, it will drop it from memory.
+SUB StoreQVD(TableName, QVDFileName)
+	STORE $(TableName) INTO $(QVDFileName)(QVD);
+	DROP TABLE $(TableName);
+ENDSUB
+
+//Get full data from table in DB
+SUB GetFullData(TableName, FieldsToGet, QVDFileName)
+	Table_Full_Tmp:
+			SQL SELECT   
+				$(FieldsToGet)
+			FROM $(TableName);
+			
+	CALL StoreQVD('Table_Full_Tmp', '$(QVDFileName)');
+ENDSUB
+
+//The function will look up for an QVD of transformation stage, 
+//if exists, it gets the value from identity field, and after, it will create a new QVD of extraction stage,
+//otherwise it gets full data from database
+//Parameters
+//TableName: name of table in the DB
+//FieldsToGet: fields of the table
+//QVDExt: Name of file extraction stage
+//QVDTra: Name of file transformation stage
+//TableIndentity: field identitiy in table
+//IsDateIndentity: -1 (True) if the field can be interpreted as a date, otherwise 0 (False).
+SUB IncrementalData(TableName, FieldsToGet, QVDExt, QVDTra, TableIndentity, IsDateIndentity)
+	
+	CALL ExistQvd('$(QVDTra)');
+	
+	IF($(QVDExist)=0) THEN
+		QVD_Tra_File:
+			LOAD 
+			If($(IsDateIndentity)=0, Max($(TableIndentity)), Date(Max($(TableIndentity)), 'YYYY-MM-DD hh:mm:ss')) as $(TableIndentity)
+			FROM $(QVDTra)(qvd);
+		
+		LET MaxValueInQVD = Peek('$(TableIndentity)',0,'QVD_Tra_File');
+		DROP Table QVD_Tra_File;
+		
+		IF($(IsDateIndentity)=-1) THEN
+			Table_Tmp:		
+				SQL SELECT $(FieldsToGet) FROM $(TableName) WHERE $(TableIndentity)>'$(MaxValueInQVD)';
+		ELSE
+			Table_Tmp:		
+				SQL SELECT $(FieldsToGet) FROM $(TableName) WHERE $(TableIndentity)>$(MaxValueInQVD);
+		ENDIF		
+
+		CALL StoreQVD('Table_Tmp', '$(QVDExt)');
+		
+	ELSE
+		CALL GetFullData('$(TableName)', '$(FieldsToGet)', '$(QVDExt)');
+	ENDIF
+ENDSUB
+///$tab Calls
+
+
+//Extration Full Data: get full data from table
+SET TableToExtract = [Sales].[SalesTerritory];
+SET FieldstoGet = [Name] as [Country],[CountryRegionCode] as [CountryCode],[Group] as [Region];
+LET QVDExt = '$(QVDPath)Sales.SalesTerritory_Ext.qvd';
+
+CALL GetFullData('$(TableToExtract)', '$(FieldstoGet)', '$(QVDExt)');
+
+
+
+//Incremental Load(Numeric Field)
+SET TableToExtract = Sales.SalesOrderHeader;
+SET FieldstoGet = SalesOrderID,SalesOrderNumber,PurchaseOrderNumber,ModifiedDate,CustomerID,SubTotal,TaxAmt,Freight,TotalDue;
+SET TableIndentity = SalesOrderID;
+SET IsDateIndentity = 0;
+LET QVDExt = '$(QVDPath)Sales.SalesOrderHeader_Ext.qvd';
+LET QVDTra = '$(QVDPath)Sales.SalesOrderHeader_Tra.qvd';
+
+CALL IncrementalData('$(TableToExtract)', '$(FieldstoGet)', '$(QVDExt)', '$(QVDTra)','$(TableIndentity)', $(IsDateIndentity));
+
+
+
+//Incremental Load(Date Field)
+SET TableToExtract = Sales.SalesOrderHeader;
+SET FieldstoGet = SalesOrderID,SalesOrderNumber,PurchaseOrderNumber,ModifiedDate,CustomerID,SubTotal,TaxAmt,Freight,TotalDue;
+SET TableIndentity = ModifiedDate;
+SET IsDateIndentity = -1;
+LET QVDExt = '$(QVDPath)Sales.SalesOrderHeader_ByDate_Ext.qvd';
+LET QVDTra = '$(QVDPath)Sales.SalesOrderHeader_ByDate_Tra.qvd';
+
+CALL IncrementalData('$(TableToExtract)', '$(FieldstoGet)', '$(QVDExt)', '$(QVDTra)','$(TableIndentity)', $(IsDateIndentity));
+
+
+exit script;
+
+
